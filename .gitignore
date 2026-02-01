@@ -2,3 +2,4 @@
 *.csv
 /Results
 /Archive
+__pycache__/*

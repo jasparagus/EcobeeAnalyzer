@@ -210,7 +210,8 @@ class ThermalAnalyzer:
                     p = np.poly1d(z)
                     xr = np.linspace(heating['Delta_T_Daily'].min(), heating['Delta_T_Daily'].max(), 50)
                     ax1.plot(xr, p(xr), 'r--', alpha=0.5, label='Heating Fit')
-                except: pass
+                except Exception:
+                    pass
 
         if not cooling.empty:
             ax1.scatter(cooling['Delta_T_Daily'], cooling['Inverter_Power_kW'], 
@@ -221,6 +222,8 @@ class ThermalAnalyzer:
                     p = np.poly1d(z)
                     xr = np.linspace(cooling['Delta_T_Daily'].min(), cooling['Delta_T_Daily'].max(), 50)
                     ax1.plot(xr, p(xr), 'b--', alpha=0.5, label='Cooling Fit')
+                except Exception:
+                    pass
 
         ax1.set_title(f"Inverter Power Output (Est. Baseload: {self.baseload_kw:.2f} kW)")
         ax1.set_xlabel("Outdoor - Indoor Temp (°F) [Neg=Heating, Pos=Cooling]")
