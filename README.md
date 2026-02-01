@@ -10,7 +10,7 @@ The primary goal of this project is to overcome the "observability gap" in resid
 * **Privacy-First & Local:** No cloud API integrations required. The tool operates entirely on local CSV exports (Ecobee) and XML exports (Green Button Data), ensuring total privacy.
 * **Physics Over AI:** Instead of using black-box machine learning, this tool uses first-principles thermodynamics (Newton's Law of Cooling, Thermal RC modeling) to derive actionable metrics.
 * **Inverter Transparency:** By correlating thermal decay ("coasting") with energy usage, the tool reverse-engineers the power curve of inverter-driven systems, which typically do not report their real-time power consumption to thermostats.
-* **Self-Documenting Analysis:** Every analysis run generates self-contained plots and text reports with specific filter parameters (e.g., "Night Only"), allowing for reproducible scientific inquiry into the home's performance.
+* **Self-Documenting Output:** **All generated figures and reports must be fully self-contained.** Every plot includes the analysis date range, active filter settings (e.g., "Night Only"), and calculated metrics (Tau) directly in the title/subtitle. This ensures that a screenshot of a result is scientifically complete without external context.
 
 ---
 
@@ -22,10 +22,10 @@ The primary goal of this project is to overcome the "observability gap" in resid
     * Separates analysis into Heating (Winter) and Cooling (Summer) regimes.
     * **"Washout" Filtering:** Automatically excludes data periods immediately following HVAC cycles to prevent thermal inertia from corrupting the analysis.
     * **Solar Exclusion:** Optional "Night Only" mode to isolate conductive heat loss from solar gain.
-* **Inverter Profiling (Reverse Calorimetry):**
+* **Inverter Profiling (Energy Signature):**
     * Ingests "Green Button" XML power data from utility providers.
     * Calculates **Baseload Power** to isolate HVAC energy.
-    * Generates a performance curve: **Inverter Power (kW) vs. Temperature Delta**.
+    * Generates a performance curve: **Daily Energy (kWh) vs. Temperature Delta**, showing the "cost to condition" the home at various outdoor temperatures.
 
 ---
 
@@ -53,12 +53,12 @@ $$\underbrace{\frac{dT_{in}}{dt}}_{Y} = \underbrace{\frac{UA}{C}}_{\text{Slope }
 The inverse of the slope gives us the **Thermal Time Constant ($\tau$)**:
 $$\tau = \frac{C}{UA} = \frac{1}{Slope}$$
 
-### 3.3 Reverse Calorimetry (Inverter Power Estimation)
-For inverter systems, power output varies with load. Once we estimate the Thermal Mass ($C$) based on square footage (Assumed $\approx 3.5$ BTU/°F per sq ft), we can combine the thermostat runtime with daily energy data (Green Button) to solve for average operating power:
+### 3.3 Energy Signature (Daily kWh vs Delta T)
+For inverter systems, instantaneous power varies. A more robust metric is the **Energy Signature**, which correlates daily energy input with the daily thermal load (Delta T).
 
-$$P_{inverter}(kW) \approx \frac{E_{total\_daily} - E_{baseload}}{t_{runtime}}$$
+$$E_{hvac}(kWh) \approx E_{total} - (P_{base} \times 24h)$$
 
-This allows us to plot the **Real-World Power Curve**  of the specific installed unit against the temperature delta.
+Plotting $E_{hvac}$ vs $(T_{out} - T_{in})$ reveals the system's efficiency curve and the building's aggregate thermal load.
 
 ---
 
@@ -90,11 +90,3 @@ This allows us to plot the **Real-World Power Curve**  of the specific installed
     * Toggle **30m Buffer** to ignore lingering heat after HVAC cycles.
 4.  **Analyze:** Click "Calculate Profile".
 5.  **Results:** Check the `./Results` folder for generated plots (`.png`) and text reports (`.txt`).
-
----
-
-## 5. Assumptions & Constants
-
-* **Thermal Mass Factor:** The tool estimates thermal capacitance ($C$) as **3.5 BTU/°F per sq ft**, a standard approximation for stick-framed residential construction with drywall.
-* **Baseload Estimation:** Baseload power is derived from days with minimal HVAC runtime (< 0.2 hours). If no such days exist in the dataset, the 5th percentile of daily usage is used as a fallback.
-* **System Type:** The power analysis logic assumes an **Inverter-Driven Heat Pump** or air conditioner where power consumption is correlated with runtime and load, rather than a single-stage system.

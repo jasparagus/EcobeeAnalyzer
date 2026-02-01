@@ -22,6 +22,7 @@ class ThermalAnalyzer:
         self.fit_cooling = None
         self.fit_heating = None
         self.daily_combined = None
+        self.active_filters = {}
         
         # Physics Constants
         self.sq_ft = 1500  # Default updated to 1500
@@ -71,7 +72,6 @@ class ThermalAnalyzer:
                             elif child.tag.endswith('value'): value = int(child.text)
                         
                         # FILTER: Only accept roughly daily readings (86400s)
-                        # This ignores Monthly summaries (duration > 25 hours)
                         if start is not None and value is not None:
                             if duration and duration < 90000: 
                                 readings.append({'Start': start, 'Duration': duration, 'Value': value})
@@ -81,8 +81,6 @@ class ThermalAnalyzer:
         if readings:
             pdf = pd.DataFrame(readings)
             pdf['Timestamp'] = pd.to_datetime(pdf['Start'], unit='s')
-            # Assuming 'Value' is Wh. For Daily files, it's often kWh directly or Wh scaled.
-            # Based on user snippet, values like 30-50 for daily suggest kWh.
             pdf['kWh'] = pdf['Value'] 
             pdf = pdf.set_index('Timestamp').sort_index()
             
@@ -95,6 +93,11 @@ class ThermalAnalyzer:
     def analyze(self, night_only=False, buffer_minutes=30, sq_ft=1500):
         if self.df is None: self.load_data()
         self.sq_ft = sq_ft
+        self.active_filters = {
+            'night_only': night_only, 
+            'buffer_minutes': buffer_minutes,
+            'sq_ft': sq_ft
+        }
         
         # 1. Estimate Thermal Mass (C)
         self.C_est = self.sq_ft * 3.5 
@@ -141,49 +144,41 @@ class ThermalAnalyzer:
 
     def _analyze_inverter_performance(self):
         """Correlates Daily Ecobee Runtime with Daily Green Button Energy."""
-        # Aggregate Ecobee data to Day
         cols = ['Cool Stage 1 (sec)', 'Heat Stage 1 (sec)', 'Fan (sec)']
         daily_ecobee = self.df[cols].resample('D').sum()
         
         daily_temps = self.df[['Current Temp (F)', 'Outdoor Temp (F)']].resample('D').mean()
         
-        # Calculate Runtime in Hours
         daily_ecobee['Runtime_Cool_Hr'] = daily_ecobee['Cool Stage 1 (sec)'] / 3600.0
         daily_ecobee['Runtime_Heat_Hr'] = daily_ecobee['Heat Stage 1 (sec)'] / 3600.0
         daily_ecobee['Runtime_Total_Hr'] = daily_ecobee['Runtime_Cool_Hr'] + daily_ecobee['Runtime_Heat_Hr']
         
-        # Merge Ecobee + Power
         combined = pd.concat([daily_ecobee, daily_temps, self.power_df], axis=1).dropna()
         
         if combined.empty:
             print("Warning: No date overlap between Thermostat and Power data.")
             return
 
-        # Estimate Baseload (Lowest usage days where HVAC was mostly off)
-        # We look for days with < 0.2 hours of HVAC
+        # Estimate Baseload
         low_usage_days = combined[combined['Runtime_Total_Hr'] < 0.2]
         
         if not low_usage_days.empty:
             self.baseload_kw = low_usage_days['kWh'].mean() / 24.0
             print(f"Baseload estimated from off-days: {self.baseload_kw:.2f} kW")
         else:
-            # Fallback: 5th percentile of total daily power
             self.baseload_kw = (combined['kWh'] / 24.0).quantile(0.05)
             print(f"Baseload estimated (quantile): {self.baseload_kw:.2f} kW")
 
-        # Calculate HVAC Specific Energy
+        # Calculate HVAC Specific Energy (Total Daily kWh)
         combined['kWh_HVAC'] = combined['kWh'] - (self.baseload_kw * 24.0)
+        combined.loc[combined['kWh_HVAC'] < 0, 'kWh_HVAC'] = 0 # Clamp negative
         
-        # Calculate Inverter Power (kW)
-        # We need to filter out low-runtime days to avoid the "1/x" asymptote noise
-        # FILTER: Require at least 2.5 hours of runtime to calculate average power
-        valid = combined[combined['Runtime_Total_Hr'] > 2.5].copy()
+        # Calculate Delta T (Signed)
+        combined['Delta_T_Daily'] = combined['Outdoor Temp (F)'] - combined['Current Temp (F)']
         
-        valid['Inverter_Power_kW'] = valid['kWh_HVAC'] / valid['Runtime_Total_Hr']
-        
-        # Calculate Delta T (Signed: Outdoor - Indoor)
-        # Heating days will be negative, Cooling days positive
-        valid['Delta_T_Daily'] = valid['Outdoor Temp (F)'] - valid['Current Temp (F)']
+        # Filter for valid days (some HVAC usage, positive energy)
+        # We allow small runtimes now since we are plotting Energy, not Rate
+        valid = combined[combined['Runtime_Total_Hr'] > 0.1].copy()
         
         self.daily_combined = valid
 
@@ -192,58 +187,48 @@ class ThermalAnalyzer:
             print("No valid daily overlap data for Inverter Curve.")
             return
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12))
-        
-        # --- PLOT 1: Power vs Delta T ---
-        # Signed Delta T: Left = Heating, Right = Cooling
+        fig, ax = plt.subplots(figsize=(10, 7))
         
         heating = self.daily_combined[self.daily_combined['Delta_T_Daily'] < 0]
         cooling = self.daily_combined[self.daily_combined['Delta_T_Daily'] > 0]
         
+        # Plot Heating
         if not heating.empty:
-            ax1.scatter(heating['Delta_T_Daily'], heating['Inverter_Power_kW'], 
-                       c='red', label='Heating Days', alpha=0.7)
-            # Quadratic Fit
+            ax.scatter(heating['Delta_T_Daily'], heating['kWh_HVAC'], 
+                       c='red', label='Heating Days', alpha=0.6, edgecolors='none')
+            # Linear Fit for Energy vs Delta T
             if len(heating) > 5:
                 try:
-                    z = np.polyfit(heating['Delta_T_Daily'], heating['Inverter_Power_kW'], 2)
+                    z = np.polyfit(heating['Delta_T_Daily'], heating['kWh_HVAC'], 1)
                     p = np.poly1d(z)
                     xr = np.linspace(heating['Delta_T_Daily'].min(), heating['Delta_T_Daily'].max(), 50)
-                    ax1.plot(xr, p(xr), 'r--', alpha=0.5, label='Heating Fit')
-                except Exception:
-                    pass
+                    ax.plot(xr, p(xr), 'r--', lw=2, label=f'Heating Trend')
+                except: pass
 
+        # Plot Cooling
         if not cooling.empty:
-            ax1.scatter(cooling['Delta_T_Daily'], cooling['Inverter_Power_kW'], 
-                       c='blue', label='Cooling Days', alpha=0.7)
+            ax.scatter(cooling['Delta_T_Daily'], cooling['kWh_HVAC'], 
+                       c='blue', label='Cooling Days', alpha=0.6, edgecolors='none')
+            # Linear Fit for Energy vs Delta T
             if len(cooling) > 5:
                 try:
-                    z = np.polyfit(cooling['Delta_T_Daily'], cooling['Inverter_Power_kW'], 2)
+                    z = np.polyfit(cooling['Delta_T_Daily'], cooling['kWh_HVAC'], 1)
                     p = np.poly1d(z)
                     xr = np.linspace(cooling['Delta_T_Daily'].min(), cooling['Delta_T_Daily'].max(), 50)
-                    ax1.plot(xr, p(xr), 'b--', alpha=0.5, label='Cooling Fit')
-                except Exception:
-                    pass
+                    ax.plot(xr, p(xr), 'b--', lw=2, label=f'Cooling Trend')
+                except: pass
 
-        ax1.set_title(f"Inverter Power Output (Est. Baseload: {self.baseload_kw:.2f} kW)")
-        ax1.set_xlabel("Outdoor - Indoor Temp (°F) [Neg=Heating, Pos=Cooling]")
-        ax1.set_ylabel("Avg Operating Power (kW)")
-        ax1.axvline(0, color='k', lw=0.5)
-        ax1.grid(True, alpha=0.3)
-        ax1.legend()
-
-        # --- PLOT 2: Raw Energy Sanity Check ---
-        # Plotting Total Daily kWh vs Delta T (should be linear-ish V shape)
-        # This confirms if the data itself is valid, independent of Runtime division
+        # Build Subtitle
+        start_str = self.df.index.min().strftime('%Y-%m-%d')
+        end_str = self.df.index.max().strftime('%Y-%m-%d')
+        subtitle = f"Range: {start_str} to {end_str}\nEst. Baseload: {self.baseload_kw:.2f} kW (Subtracted)"
         
-        ax2.scatter(self.daily_combined['Delta_T_Daily'], self.daily_combined['kWh'],
-                    c='grey', alpha=0.6, label='Total Daily Energy')
-        
-        ax2.set_title("Sanity Check: Total Daily Energy vs Temp")
-        ax2.set_xlabel("Outdoor - Indoor Temp (°F)")
-        ax2.set_ylabel("Total House Energy (kWh/day)")
-        ax2.axvline(0, color='k', lw=0.5)
-        ax2.grid(True, alpha=0.3)
+        ax.set_title(f"Daily HVAC Energy vs. Temperature Delta\n{subtitle}", fontsize=11)
+        ax.set_xlabel("Outdoor - Indoor Temp (°F) [Neg=Heating, Pos=Cooling]")
+        ax.set_ylabel("Total Daily HVAC Energy (kWh)")
+        ax.axvline(0, color='k', lw=0.5)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
         
         plt.tight_layout()
         self._ensure_results_dir()
@@ -256,11 +241,14 @@ class ThermalAnalyzer:
         filepath = os.path.join("Results", filename)
         
         lines = []
-        lines.append(f"Thermal Analysis & Inverter Report")
-        lines.append(f"==================================")
+        lines.append(f"Thermal Analysis & Energy Report")
+        lines.append(f"================================")
+        lines.append(f"Analysis Range: {self.df.index.min()} to {self.df.index.max()}")
         lines.append(f"House Size: {self.sq_ft} sq ft")
         if not self.power_df.empty:
              lines.append(f"Baseload Power Est: {self.baseload_kw:.2f} kW")
+        
+        lines.append(f"Filters: NightOnly={self.active_filters.get('night_only')}, Buffer={self.active_filters.get('buffer_minutes')}m")
         
         # Fits
         def print_fit(fit, name):
@@ -271,7 +259,7 @@ class ThermalAnalyzer:
             else:
                 lines.append(f"{name}: Insufficient Data")
         
-        lines.append("\n-- Envelope Properties --")
+        lines.append("\n-- Envelope Properties (Coasting) --")
         print_fit(self.fit_heating, "Heating (Winter)")
         print_fit(self.fit_cooling, "Cooling (Summer)")
         
@@ -288,21 +276,37 @@ class ThermalAnalyzer:
             ax.scatter(self.coasting_df['Delta_T'], self.coasting_df['dT_dt'], 
                        alpha=0.3, color='grey', label='Coasting Data')
             
+        # Plot fits
+        tau_h_str = "N/A"
+        tau_c_str = "N/A"
+        
         if self.fit_heating:
             m, b = self.fit_heating
-            x = np.linspace(self.heating_data['Delta_T'].min(), self.heating_data['Delta_T'].max(), 100)
-            ax.plot(x, m*x+b, 'r-', label='Heating Fit')
+            if m > 0.001:
+                tau_h_str = f"{1/m:.1f}h"
+                x = np.linspace(self.heating_data['Delta_T'].min(), self.heating_data['Delta_T'].max(), 100)
+                ax.plot(x, m*x+b, 'r-', lw=2, label=f'Heating Fit (Tau={tau_h_str})')
             
         if self.fit_cooling:
             m, b = self.fit_cooling
-            x = np.linspace(self.cooling_data['Delta_T'].min(), self.cooling_data['Delta_T'].max(), 100)
-            ax.plot(x, m*x+b, 'b-', label='Cooling Fit')
-            
-        ax.set_title("Thermal Response (Coasting)")
-        ax.set_xlabel("Delta T (F)")
-        ax.set_ylabel("dT/dt (F/hr)")
-        ax.grid(True)
+            if m > 0.001:
+                tau_c_str = f"{1/m:.1f}h"
+                x = np.linspace(self.cooling_data['Delta_T'].min(), self.cooling_data['Delta_T'].max(), 100)
+                ax.plot(x, m*x+b, 'b-', lw=2, label=f'Cooling Fit (Tau={tau_c_str})')
+        
+        # Subtitle
+        start_str = self.df.index.min().strftime('%Y-%m-%d')
+        end_str = self.df.index.max().strftime('%Y-%m-%d')
+        filter_str = f"Filters: [Night={self.active_filters.get('night_only')} | Buffer={self.active_filters.get('buffer_minutes')}m]"
+        subtitle = f"Range: {start_str} to {end_str}\n{filter_str}\nTau: Heat={tau_h_str}, Cool={tau_c_str}"
+
+        ax.set_title(f"Thermal Response: Indoor Rate of Change vs. Delta T\n{subtitle}", fontsize=10)
+        ax.set_xlabel("Outdoor - Indoor Temperature (°F)")
+        ax.set_ylabel("Indoor Rate of Change (°F/hr)")
+        ax.grid(True, alpha=0.3)
         ax.legend()
+        
+        plt.tight_layout()
         if filename: plt.savefig(filepath)
         if show: plt.show()
         else: plt.close()
