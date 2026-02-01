@@ -1,0 +1,4 @@
+*.xml
+*.csv
+/Results
+/Archive

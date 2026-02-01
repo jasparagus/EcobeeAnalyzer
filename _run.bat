@@ -1,0 +1,2 @@
+python ecobee_viewer.py
+pause
