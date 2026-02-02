@@ -2,6 +2,8 @@
 
 A local, physics-based analysis tool that turns your Ecobee thermostat data into a building performance lab. This tool estimates your home's **Thermal Time Constant**, **Heat Transfer Coefficient (UA)**, and **Inverter Heat Pump performance profiles** using historical runtime and temperature data.
 
+This tool was built using Google Gemini.
+
 ## 1. Design Goals
 
 The primary goal of this project is to overcome the "observability gap" in residential HVAC. Smart thermostats collect vast amounts of data, but native dashboards rarely provide insights into the physical properties of the building envelope or the variable-speed performance of modern inverter heat pumps.
