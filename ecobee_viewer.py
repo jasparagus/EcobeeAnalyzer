@@ -44,12 +44,18 @@ class ThermostatApp:
         ax_checks.set_frame_on(False)
 
         # 4. Square Footage Input (Center-Right)
-        ax_box = plt.axes([0.45, 0.08, 0.1, 0.05])
+        ax_box = plt.axes([0.44, 0.08, 0.07, 0.05])
         self.text_box = TextBox(ax_box, 'Sq Ft: ', initial=self.sq_ft_val)
         self.text_box.on_submit(self.submit_sq_ft)
 
-        # 5. Calculate Button (Right)
-        ax_calc = plt.axes([0.60, 0.05, 0.2, 0.075])
+        # 5. Timezone Input (Right-of-Center)
+        self.tz_val = "US/Pacific"
+        ax_tz = plt.axes([0.55, 0.08, 0.10, 0.05])
+        self.text_tz = TextBox(ax_tz, 'TZ: ', initial=self.tz_val)
+        self.text_tz.on_submit(self.submit_tz)
+
+        # 6. Calculate Button (Right)
+        ax_calc = plt.axes([0.68, 0.05, 0.2, 0.075])
         self.btn_calc = Button(ax_calc, 'Calculate Profile')
         self.btn_calc.on_clicked(self.run_calculation)
         
@@ -58,6 +64,9 @@ class ThermostatApp:
 
     def submit_sq_ft(self, text):
         self.sq_ft_val = text
+
+    def submit_tz(self, text):
+        self.tz_val = text
 
     def set_empty_view(self):
         self.ax1.set_title("No Data Loaded. Click 'Load Ecobee' to select CSV files.")
@@ -185,7 +194,8 @@ class ThermostatApp:
             'night_only': status[0],
             'buffer_minutes': 30 if status[1] else 0,
             'use_zoomed': status[2],
-            'sq_ft': sq
+            'sq_ft': sq,
+            'timezone': self.tz_val
         }
 
     def _generate_file_suffix(self, opts):
@@ -193,6 +203,8 @@ class ThermostatApp:
         if opts['night_only']: suffix += "_night"
         if opts['buffer_minutes'] > 0: suffix += f"_buffer{opts['buffer_minutes']}"
         suffix += f"_{int(opts['sq_ft'])}sqft"
+        # We don't necessarily need TZ in filename unless user wants it, but it helps tracking? 
+        # For now, keep it simple as requested.
         return suffix
 
     def run_calculation(self, event):
@@ -221,7 +233,7 @@ class ThermostatApp:
                 print(f"Error processing zoomed range: {e}")
                 return
 
-        print(f"Running Analysis... SqFt={opts['sq_ft']}, Night={opts['night_only']}")
+        print(f"Running Analysis... SqFt={opts['sq_ft']}, Night={opts['night_only']}, TZ={opts['timezone']}")
         
         if ThermalAnalyzer:
             analyzer = ThermalAnalyzer(dataframe=target_df.set_index('Timestamp'))
@@ -232,7 +244,12 @@ class ThermostatApp:
             
             # Run Analysis
             try:
-                analyzer.analyze(night_only=opts['night_only'], buffer_minutes=opts['buffer_minutes'], sq_ft=opts['sq_ft'])
+                analyzer.analyze(
+                    night_only=opts['night_only'], 
+                    buffer_minutes=opts['buffer_minutes'], 
+                    sq_ft=opts['sq_ft'],
+                    timezone=opts['timezone']
+                )
                 
                 # Generate Filenames
                 start_str = target_df['Timestamp'].min().strftime('%Y%m%d')
@@ -246,6 +263,7 @@ class ThermostatApp:
                 
                 if self.power_files:
                     analyzer.plot_inverter_curve(filename=f"inverter_profile_{base_name}.png", show=True)
+                    analyzer.plot_energy_profile(filename=f"energy_total_{base_name}.png", show=True)
                     
             except Exception as e:
                 print(f"Analysis Failed: {e}")
