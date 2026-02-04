@@ -292,43 +292,63 @@ class ThermalAnalyzer:
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
         
-        # --- PLOT 1: Baseload Regression ---
+        # --- PLOT 1: Baseload Regression (Runtime Method) ---
         x = self.daily_combined['Runtime_Total_Hr']
         y = self.daily_combined['kWh']
-        ax1.scatter(x, y, alpha=0.5, c='purple')
+        ax1.scatter(x, y, alpha=0.5, c='purple', label='Daily Data')
         
         slope, intercept, r_val, p, err = stats.linregress(x, y)
         xr = np.linspace(0, x.max(), 50)
-        ax1.plot(xr, slope*xr + intercept, 'k--', lw=2, label=f'R2={r_val**2:.3f}')
+        ax1.plot(xr, slope*xr + intercept, 'k--', lw=2, label=f'Fit (R2={r_val**2:.2f})')
         
-        ax1.set_title(f"Baseload Determination\nIntercept = {intercept:.1f} kWh/day ({intercept/24:.2f} kW)")
-        ax1.set_xlabel("Runtime (Hours)")
-        ax1.set_ylabel("Total Daily kWh")
-        ax1.grid(True, alpha=0.3)
-        ax1.legend()
+        # Annotate
+        ax1.axhline(intercept, color='green', linestyle=':', alpha=0.5, label='Projected Baseload')
+        ax1.text(0.05, 0.95, 
+                 f"Slope (Avg HVAC Power): {slope:.2f} kW\n"
+                 f"Intercept (Baseload): {intercept:.1f} kWh/day\n"
+                 f"(= {intercept/24:.2f} kW avg)", 
+                 transform=ax1.transAxes, verticalalignment='top', 
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
 
-        # --- PLOT 2: Cost to Condition (Raw Total Energy) ---
+        ax1.set_title("Method 1: Runtime Regression\n(Determines Baseload for Subtraction)")
+        ax1.set_xlabel("Total HVAC Runtime (Hours)")
+        ax1.set_ylabel("Total Daily Energy (kWh)")
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(loc='lower right')
+
+        # --- PLOT 2: Cost to Condition (Temperature Method) ---
         heat = self.daily_combined[self.daily_combined['Mode'] == 'Heating']
         cool = self.daily_combined[self.daily_combined['Mode'] == 'Cooling']
         
+        # Plot Baseload Reference from Method 1
+        ax2.axhline(intercept, color='green', linestyle=':', alpha=0.5, label=f'Baseload Ref ({intercept:.1f} kWh)')
+        
         if not heat.empty:
-            ax2.scatter(heat['Active_Delta_T'], heat['kWh'], c='red', alpha=0.6, label='Heating')
+            ax2.scatter(heat['Active_Delta_T'], heat['kWh'], c='red', alpha=0.6, label='Heating Days')
             if len(heat) > 5:
                 res = stats.linregress(heat['Active_Delta_T'], heat['kWh'])
                 xr = np.linspace(heat['Active_Delta_T'].min(), heat['Active_Delta_T'].max(), 50)
-                ax2.plot(xr, res.slope*xr + res.intercept, 'r--', 
-                         label=f'Slope: {res.slope:.2f} kWh/deg')
-        
+                ax2.plot(xr, res.slope*xr + res.intercept, 'r--', label='Heating Fit')
+                # Annotate Slope
+                ax2.text(0.05, 0.85, 
+                         f"Heating Slope: {res.slope:.2f} kWh/°F\n" + 
+                         f"(Cost to Condition)", 
+                         transform=ax2.transAxes, color='red', fontsize=9, fontweight='bold')
+
         if not cool.empty:
-            ax2.scatter(cool['Active_Delta_T'], cool['kWh'], c='blue', alpha=0.6, label='Cooling')
+            ax2.scatter(cool['Active_Delta_T'], cool['kWh'], c='blue', alpha=0.6, label='Cooling Days')
             if len(cool) > 5:
                 res = stats.linregress(cool['Active_Delta_T'], cool['kWh'])
                 xr = np.linspace(cool['Active_Delta_T'].min(), cool['Active_Delta_T'].max(), 50)
-                ax2.plot(xr, res.slope*xr + res.intercept, 'b--', 
-                         label=f'Slope: {res.slope:.2f} kWh/deg')
+                ax2.plot(xr, res.slope*xr + res.intercept, 'b--', label='Cooling Fit')
+                # Annotate Slope
+                ax2.text(0.05, 0.15, 
+                         f"Cooling Slope: {res.slope:.2f} kWh/°F\n" + 
+                         f"(Cost to Condition)", 
+                         transform=ax2.transAxes, color='blue', fontsize=9, fontweight='bold')
                 
-        ax2.set_title("Total Energy Profile (Cost to Condition)")
-        ax2.set_xlabel("Delta T (F)")
+        ax2.set_title("Method 2: Temperature Profile\n(Raw Total Energy vs Delta T)")
+        ax2.set_xlabel("Outdoor - Indoor Delta T (°F)")
         ax2.set_ylabel("Total Daily Energy (kWh)")
         ax2.grid(True, alpha=0.3)
         ax2.legend()
