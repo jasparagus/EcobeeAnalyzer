@@ -224,61 +224,68 @@ class ThermalAnalyzer:
     def plot_inverter_curve(self, filename='inverter_profile.png', show=True):
         if self.daily_combined is None or self.daily_combined.empty: return
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12))
+        fig, ax = plt.subplots(figsize=(10, 7))
         
         heating = self.daily_combined[self.daily_combined['Mode'] == 'Heating']
         cooling = self.daily_combined[self.daily_combined['Mode'] == 'Cooling']
-        
-        # --- PLOT 1: Estimated HVAC Energy (Baseload Removed) ---
-        if not heating.empty:
-            ax1.scatter(heating['Active_Delta_T'], heating['kWh_HVAC'], c='red', label='Heating', alpha=0.6)
-            if len(heating) > 5:
-                z = np.polyfit(heating['Active_Delta_T'], heating['kWh_HVAC'], 1)
-                p = np.poly1d(z)
-                xr = np.linspace(heating['Active_Delta_T'].min(), heating['Active_Delta_T'].max(), 50)
-                ax1.plot(xr, p(xr), 'r--', label=f'Heat: {z[0]:.2f} kWh/deg')
 
-        if not cooling.empty:
-            ax1.scatter(cooling['Active_Delta_T'], cooling['kWh_HVAC'], c='blue', label='Cooling', alpha=0.6)
-            if len(cooling) > 5:
-                z = np.polyfit(cooling['Active_Delta_T'], cooling['kWh_HVAC'], 1)
-                p = np.poly1d(z)
-                xr = np.linspace(cooling['Active_Delta_T'].min(), cooling['Active_Delta_T'].max(), 50)
-                ax1.plot(xr, p(xr), 'b--', label=f'Cool: {z[0]:.2f} kWh/deg')
-
-        ax1.set_title(f"Estimated HVAC Energy (Baseload {self.baseload_kw:.2f} kW removed)")
-        ax1.set_ylabel("HVAC Energy (kWh/day)")
-        ax1.set_xlabel("Delta T (F)")
-        ax1.grid(True, alpha=0.3)
-        ax1.legend()
-
-        # --- PLOT 2: Inverter Power kW ---
-        # Filter for stability (Runtime > 1h)
+        # Filter for stability (Runtime > 1h) to avoid asymptotic noise
         h_stable = heating[heating['Runtime_Total_Hr'] > 1.0]
         c_stable = cooling[cooling['Runtime_Total_Hr'] > 1.0]
 
-        if not h_stable.empty:
-            ax2.scatter(h_stable['Active_Delta_T'], h_stable['Inverter_Power_kW'], c='red', alpha=0.6)
-            if len(h_stable) > 5:
+        def plot_series(data, color, label_prefix):
+            if data.empty: return
+            x = data['Active_Delta_T']
+            y = data['Inverter_Power_kW']
+            
+            ax.scatter(x, y, c=color, alpha=0.6, label=f'{label_prefix} Data')
+            
+            # Quadratic fit
+            if len(data) > 5:
                 try:
-                    z = np.polyfit(h_stable['Active_Delta_T'], h_stable['Inverter_Power_kW'], 2)
-                    xr = np.linspace(h_stable['Active_Delta_T'].min(), h_stable['Active_Delta_T'].max(), 50)
-                    ax2.plot(xr, np.poly1d(z)(xr), 'r--', alpha=0.5)
+                    z = np.polyfit(x, y, 2)
+                    p = np.poly1d(z)
+                    xr = np.linspace(x.min(), x.max(), 50)
+                    ax.plot(xr, p(xr), color=color, linestyle='--', alpha=0.8, lw=2)
+                    
+                    # Annotations
+                    min_p = y.min()
+                    max_p = y.max()
+                    eq_str = f"{z[0]:.4f}x² + {z[1]:.3f}x + {z[2]:.2f}"
+                    
+                    # Add stats box
+                    text_str = (f"{label_prefix} Performance:\n"
+                                f"Range: {min_p:.2f} - {max_p:.2f} kW\n"
+                                f"Fit: {eq_str}")
+                    
+                    # Position box based on heating/cooling (Heating=Left/Top, Cooling=Right/Bottom roughly)
+                    yloc = 0.85 if label_prefix == 'Heating' else 0.15
+                    xloc = 0.05 if label_prefix == 'Heating' else 0.65
+                    
+                    ax.text(xloc, yloc, text_str, transform=ax.transAxes, 
+                            verticalalignment='top', fontsize=9,
+                            bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor=color))
                 except: pass
 
-        if not c_stable.empty:
-            ax2.scatter(c_stable['Active_Delta_T'], c_stable['Inverter_Power_kW'], c='blue', alpha=0.6)
-            if len(c_stable) > 5:
-                try:
-                    z = np.polyfit(c_stable['Active_Delta_T'], c_stable['Inverter_Power_kW'], 2)
-                    xr = np.linspace(c_stable['Active_Delta_T'].min(), c_stable['Active_Delta_T'].max(), 50)
-                    ax2.plot(xr, np.poly1d(z)(xr), 'b--', alpha=0.5)
-                except: pass
+        plot_series(h_stable, 'red', 'Heating')
+        plot_series(c_stable, 'blue', 'Cooling')
 
-        ax2.set_title("Inverter Efficiency Profile (Avg kW)")
-        ax2.set_ylabel("Average Power (kW)")
-        ax2.set_xlabel("Delta T (F)")
-        ax2.grid(True, alpha=0.3)
+        ax.set_title("Inverter Modulation Profile (System Capacity)\nHow the system ramps power to meet demand", fontsize=11)
+        ax.set_xlabel("Active Delta T (°F) [Outdoor - Indoor]", fontsize=10)
+        ax.set_ylabel("Average Power Output (kW)", fontsize=10)
+        ax.axvline(0, color='k', lw=0.5)
+        ax.grid(True, alpha=0.3)
+        
+        # Interpretation Guide
+        guide_text = ("Interpretation:\n"
+                      "• Flat Line: Single/Two-Stage System (Fixed Capacity)\n"
+                      "• Sloped/Curved: Inverter System (Modulating Capacity)\n"
+                      "• Scatter: Unit cycling or defrost events")
+        ax.text(0.98, 0.98, guide_text, transform=ax.transAxes, 
+                horizontalalignment='right', verticalalignment='top', fontsize=8, color='#555555',
+                bbox=dict(boxstyle='square', facecolor='#f0f0f0', alpha=1.0))
+
+        ax.legend(loc='lower left')
         
         plt.tight_layout()
         self._ensure_results_dir()
