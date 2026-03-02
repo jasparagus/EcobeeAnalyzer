@@ -5,6 +5,7 @@ import matplotlib.patches as mpatches
 from matplotlib.widgets import Button, CheckButtons, TextBox
 from tkinter import Tk, filedialog
 import os
+import xml.etree.ElementTree as ET
 
 # Import the analyzer module
 try:
@@ -20,9 +21,11 @@ class ThermostatApp:
         self.files_loaded = []
         self.sq_ft_val = "1500" # Updated Default
         
+        self.raw_power_df = pd.DataFrame()
+        
         # Setup the main plot window
-        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True, 
-                                                      gridspec_kw={'height_ratios': [3, 1]})
+        self.fig, (self.ax1, self.ax2, self.ax3) = plt.subplots(3, 1, figsize=(14, 8), sharex=True, 
+                                                              gridspec_kw={'height_ratios': [4, 1, 1.5]})
         plt.subplots_adjust(bottom=0.25)
         
         # --- UI CONTROLS ---
@@ -71,7 +74,9 @@ class ThermostatApp:
     def set_empty_view(self):
         self.ax1.set_title("No Data Loaded. Click 'Load Ecobee' to select CSV files.")
         self.ax1.grid(True, alpha=0.3)
-        self.ax2.set_xlabel("Time")
+        self.ax2.set_ylabel('Program')
+        self.ax3.set_ylabel('Usage (kWh)')
+        self.ax3.set_xlabel("Time")
 
     def load_data(self, event):
         root = Tk()
@@ -110,13 +115,63 @@ class ThermostatApp:
         
         if file_paths:
             self.power_files.extend(file_paths)
-            print(f"Loaded {len(file_paths)} Power XML files. (Will process during calculation)")
+            print(f"Loaded {len(file_paths)} Power XML files.")
+            
+            # Parse XML for GreenButton Plot View
+            readings = []
+            for fp in file_paths:
+                try:
+                    tree = ET.parse(fp)
+                    root = tree.getroot()
+                    for elem in root.iter():
+                        if elem.tag.endswith('IntervalReading'):
+                            start = None
+                            duration = None
+                            value = None
+                            for child in elem.iter():
+                                if child.tag.endswith('start'): start = int(child.text)
+                                elif child.tag.endswith('duration'): duration = int(child.text)
+                                elif child.tag.endswith('value'): value = int(child.text)
+                            
+                            if start is not None and value is not None:
+                                readings.append({'Start': start, 'Duration': duration, 'Value': value})
+                except Exception as e:
+                    print(f"Error parsing XML {fp} for UI: {e}")
+            
+            if readings:
+                pdf = pd.DataFrame(readings)
+                # Ensure UTC conversion for matching if Ecobee data uses local, Green Button typically UTC
+                pdf['Timestamp'] = pd.to_datetime(pdf['Start'], unit='s')
+                pdf['kWh'] = pdf['Value']
+                
+                # Intelligent Resolution Selection
+                hourly_mask = pdf['Duration'] <= 4000
+                daily_mask = pdf['Duration'] >= 80000
+                
+                if hourly_mask.any():
+                    print(f"UI found {hourly_mask.sum()} hourly intervals. Discarding daily intervals.")
+                    pdf = pdf[hourly_mask]
+                elif daily_mask.any():
+                    print(f"UI found {daily_mask.sum()} daily intervals. Using daily intervals.")
+                    pdf = pdf[daily_mask]
+                
+                pdf = pdf.set_index('Timestamp').sort_index()
+                
+                if not self.raw_power_df.empty:
+                    self.raw_power_df = pd.concat([self.raw_power_df, pdf])
+                else:
+                    self.raw_power_df = pdf
+                
+                # Drop duplicates that might come from overlapping XMLs
+                self.raw_power_df = self.raw_power_df[~self.raw_power_df.index.duplicated(keep='first')]
+                
             self.ax1.set_title(f"Ecobee Data | {len(self.files_loaded)} CSVs | {len(self.power_files)} Power XMLs")
-            self.fig.canvas.draw()
+            self.update_plot() # Trigger plot update to show new power data
 
     def update_plot(self):
         self.ax1.clear()
         self.ax2.clear()
+        self.ax3.clear()
         
         df = self.df
         if df.empty: return
@@ -178,8 +233,27 @@ class ThermostatApp:
         self.ax2.set_yticks([])
         self.ax2.set_ylabel('Program')
         
+        # --- BOTTOM SUBPLOT: Power Data (GreenButton) ---
+        if not self.raw_power_df.empty:
+            p_times = self.raw_power_df.index
+            p_vals = self.raw_power_df['kWh']
+            # Compute width in days for bar chart based on duration.
+            # Assuming duration is in seconds.
+            if 'Duration' in self.raw_power_df.columns:
+                widths = self.raw_power_df['Duration'] / 86400.0
+            else:
+                widths = 1.0 / 24.0 # default 1 hour
+            
+            # Use align='edge' to plot the bar starting at the timestamp
+            self.ax3.bar(p_times, p_vals, width=widths, align='edge', color='orange', alpha=0.7, edgecolor='black', linewidth=0.5)
+            self.ax3.set_ylabel('Usage (Raw)')
+            self.ax3.grid(True, alpha=0.3)
+        else:
+             self.ax3.set_ylabel('Usage (kWh)')
+             self.ax3.text(0.5, 0.5, 'Load Power XML to see usage data', horizontalalignment='center', verticalalignment='center', transform=self.ax3.transAxes, alpha=0.5)
+
         # Date Formatting
-        self.ax2.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+        self.ax3.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
         self.fig.autofmt_xdate()
         
         self.fig.canvas.draw()
