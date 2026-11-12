@@ -3,8 +3,10 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.patches as mpatches
 from matplotlib.widgets import Button, CheckButtons, TextBox
-from tkinter import Tk, filedialog
+import tkinter as tk
+from tkinter import filedialog
 import os
+import traceback
 import xml.etree.ElementTree as ET
 
 # Import the analyzer module
@@ -78,17 +80,25 @@ class ThermostatApp:
         self.ax3.set_ylabel('Usage (kWh)')
         self.ax3.set_xlabel("Time")
 
-    def load_data(self, event):
-        root = Tk()
-        root.withdraw()
-        file_paths = filedialog.askopenfilenames(
-            filetypes=[("CSV Files", "*.csv *.CSV"), ("All Files", "*.*")]
-        )
-        root.destroy()
+    def _select_files(self, filetypes):
+        """Open file selection dialog safely without disrupting the active TkAgg mainloop."""
+        parent = getattr(tk, '_default_root', None)
+        created_root = False
+        if parent is None:
+            parent = tk.Tk()
+            parent.withdraw()
+            created_root = True
         try:
-            root.update()
-        except Exception:
-            pass
+            file_paths = filedialog.askopenfilenames(parent=parent, filetypes=filetypes)
+        finally:
+            if created_root:
+                parent.destroy()
+        return file_paths
+
+    def load_data(self, event):
+        file_paths = self._select_files(
+            [("CSV Files", "*.csv *.CSV"), ("All Files", "*.*")]
+        )
         
         if not file_paths: return
 
@@ -114,16 +124,9 @@ class ThermostatApp:
             self.update_plot()
 
     def load_power(self, event):
-        root = Tk()
-        root.withdraw()
-        file_paths = filedialog.askopenfilenames(
-            filetypes=[("XML Files", "*.xml *.XML"), ("All Files", "*.*")]
+        file_paths = self._select_files(
+            [("XML Files", "*.xml *.XML"), ("All Files", "*.*")]
         )
-        root.destroy()
-        try:
-            root.update()
-        except Exception:
-            pass
         
         if file_paths:
             new_files = [fp for fp in file_paths if fp not in self.power_files]
@@ -310,9 +313,18 @@ class ThermostatApp:
         # For now, keep it simple as requested.
         return suffix
 
+    def _set_status(self, msg):
+        print(msg, flush=True)
+        try:
+            self.ax1.set_title(msg)
+            self.fig.canvas.draw_idle()
+            self.fig.canvas.flush_events()
+        except Exception:
+            pass
+
     def run_calculation(self, event):
         if self.df.empty:
-            print("No data loaded.")
+            self._set_status("Cannot Calculate: No Ecobee CSV data loaded. Click 'Load Ecobee' first.")
             return
 
         opts = self.get_options()
@@ -329,14 +341,14 @@ class ThermostatApp:
                 target_df = target_df.loc[mask]
                 
                 if len(target_df) < 50:
-                    print("Zoomed range contains too little data (<50 pts). Analysis aborted.")
+                    self._set_status("Zoomed range contains too little data (<50 pts). Analysis aborted.")
                     return
-                print(f"Using Zoomed Range: {d_start} to {d_end}")
+                print(f"Using Zoomed Range: {d_start} to {d_end}", flush=True)
             except Exception as e:
-                print(f"Error processing zoomed range: {e}")
+                self._set_status(f"Error processing zoomed range: {e}")
                 return
 
-        print(f"Running Analysis... SqFt={opts['sq_ft']}, Night={opts['night_only']}, TZ={opts['timezone']}")
+        self._set_status(f"Running Analysis... SqFt={int(opts['sq_ft'])}, Night={opts['night_only']}, TZ={opts['timezone']}")
         
         if ThermalAnalyzer:
             analyzer = ThermalAnalyzer(dataframe=target_df.set_index('Timestamp'))
@@ -362,17 +374,24 @@ class ThermostatApp:
                 
                 # Outputs
                 analyzer.generate_report(filename=f"thermal_results_{base_name}.txt")
-                analyzer.plot_results(filename=f"thermal_plot_{base_name}.png", show=True)
+                if getattr(analyzer, 'has_subhourly_thermal', True):
+                    analyzer.plot_results(filename=f"thermal_plot_{base_name}.png", show=True)
                 analyzer.plot_balance_point(filename=f"balance_point_{base_name}.png", show=True)
                 analyzer.plot_sizing_limit(filename=f"sizing_limit_{base_name}.png", show=True)
                 
                 if self.power_files:
-                    analyzer.plot_inverter_curve(filename=f"inverter_profile_{base_name}.png", show=True)
+                    if getattr(analyzer, 'power_resolution', 'D') == 'h':
+                        analyzer.plot_inverter_curve(filename=f"inverter_profile_{base_name}.png", show=True)
+                    else:
+                        print("Note: Skipping Inverter Modulation Profile (only daily-resolution power data loaded).", flush=True)
                     analyzer.plot_energy_profile(filename=f"energy_total_{base_name}.png", show=True)
-                    
+                
+                self._set_status(
+                    f"Analysis Complete (saved to ./Results/*_{base_name}.*) | "
+                    f"{target_df['Timestamp'].min().date()} - {target_df['Timestamp'].max().date()}"
+                )
             except Exception as e:
-                print(f"Analysis Failed: {e}")
-                import traceback
+                self._set_status(f"Analysis Failed: {e} (see console for details)")
                 traceback.print_exc()
 
 if __name__ == "__main__":

@@ -74,15 +74,14 @@ $$\text{COP}_{\text{eff}} = \frac{UA \times 24\text{ hr}}{3412.14\text{ BTU/kWh}
 ### Files
 * **`ecobee_viewer.py`**: The GUI entry point. Handles file loading, plotting, and user interaction.
 * **`thermal_analysis.py`**: The physics engine. Handles resampling, filtering (washout/night logic), and regression analysis.
+* **`run.sh`**: Linux launcher script that automatically initializes a local `.venv` via `uv`, installs minimal dependencies if missing, and starts the viewer (supports double-clicking).
 
 ### Installation
 1.  Clone the repository.
-2.  Install dependencies (on Linux, ensure `python3-tk` is also installed via your system package manager):
+2.  **Quick Start on Linux (`uv`):** Double-click `run.sh` or run `./run.sh` (requires `uv` and system `tk`/`python3-tk`).
+3.  **Manual Setup:** Install dependencies and run directly:
     ```bash
     pip install pandas matplotlib scipy numpy
-    ```
-3.  Run the viewer:
-    ```bash
     python ecobee_viewer.py
     ```
 
@@ -113,7 +112,21 @@ Understanding the timestamp conventions of the two input formats is essential wh
 
 ---
 
-## 6. Known Limitations & TODO
+## 6. Data Resolution & Metric Availability
+
+Different metrics require different temporal resolutions. The analyzer automatically inspects the loaded data resolution and generates only the physically meaningful metrics and plots:
+
+| Metric / Plot | Required Thermal Resolution | Required Power Resolution | Notes |
+| :--- | :--- | :--- | :--- |
+| **Thermal Time Constant ($\tau$) & Coasting $UA$** (`thermal_plot_*.png`) | **Sub-hourly / Hourly** ($\le 2\text{h}$ step) | *None* | Requires intra-day coasting intervals ($dT_{\text{in}}/dt$ while HVAC is OFF). Skipped if only daily thermal summaries exist. |
+| **Building Balance Point ($T_{\text{balance}}$)** (`balance_point_*.png`) | **Daily or finer** | *None* | Regresses total daily runtime (hrs/day) against daily mean outdoor temperature. Valid with daily-resolution data. |
+| **Heat Pump Sizing & 100% Duty Limit** (`sizing_limit_*.png`) | **Daily or finer** | *None* | Regresses daily duty cycle (%) against daily $\Delta T$. Valid with daily-resolution data. |
+| **Inverter Modulation Curve (kW vs. $\Delta T$)** (`inverter_profile_*.png`) | **Sub-hourly / Hourly** | **Hourly** (`duration=3600`) | Requires hourly Green Button ("Daily" utility exports) to isolate active-hour kW modulation. **Skipped when only Monthly (per-day resolution) power XMLs are loaded**, since 24h totals average out intra-day compressor modulation and part-load cycling. |
+| **Daily Energy Signature, Implied $UA$ & Seasonal COP** (`energy_total_*.png`) | **Daily or finer** | **Daily or Hourly** (`duration=86400` or `3600`) | Fully supported with Monthly Green Button exports (per-day kWh resolution). If both Hourly and Monthly XMLs are loaded, hourly data is used for the Inverter Curve while all non-overlapping daily and hourly data are combined for the multi-month Energy Signature. |
+
+---
+
+## 7. Known Limitations & TODO
 
 * **TODO — Direct Empirical Baseload from Zero-Runtime Intervals:**
     * *Background:* An alternative to linear regression (`kWh` vs. `Runtime_Total_Hr`) is measuring household baseload directly during intervals when the HVAC system is completely off (`Runtime == 0`).

@@ -133,14 +133,12 @@ class ThermalAnalyzer:
                 hourly_as_daily = hourly_df['kWh'].resample('D').sum(min_count=min_hrs).dropna().to_frame()
                 self.daily_power_df = hourly_as_daily.combine_first(daily_only_df).sort_index()
                 unmatched_daily = daily_only_df.index.difference(hourly_as_daily.index)
-                if len(unmatched_daily) > 0:
-                    print(f"Found {len(hourly_df)} hourly intervals and {len(unmatched_daily)} additional daily-only dates. Utilizing combined daily resolution.")
-                    self.power_resolution = 'D'
-                    self.power_df = self.daily_power_df.copy()
-                else:
-                    print(f"Found {len(hourly_df)} hourly intervals covering all dates. Utilizing hourly resolution.")
-                    self.power_resolution = 'h'
-                    self.power_df = hourly_df
+                print(
+                    f"Found {len(hourly_df)} hourly intervals and {len(unmatched_daily)} additional daily-only dates. "
+                    f"Using hourly resolution for modulation profiling and combined daily series ({len(self.daily_power_df)} days) for daily energy analysis."
+                )
+                self.power_resolution = 'h'
+                self.power_df = hourly_df
             elif not hourly_df.empty:
                 print(f"Found {hourly_mask.sum()} hourly intervals. Utilizing hourly resolution.")
                 self.power_resolution = 'h'
@@ -239,47 +237,60 @@ class ThermalAnalyzer:
         if not all(col in self.df.columns for col in required_cols):
              raise ValueError(f"Missing columns: {required_cols}")
 
-        resampled = self.df[required_cols].resample('15min').mean()
-        resampled['dT_dt'] = resampled['Current Temp (F)'].diff() * 4 
-        resampled['Delta_T'] = resampled['Outdoor Temp (F)'] - resampled['Current Temp (F)']
-        
-        # Coasting Logic (for UA)
-        resampled['is_off_now'] = (resampled['Cool Stage 1 (sec)'] < 60) & (resampled['Heat Stage 1 (sec)'] < 60)
-        window_count = int(np.ceil(buffer_minutes / 15)) + 1
-        resampled['is_stable_off'] = resampled['is_off_now'].rolling(window=window_count).min() == 1
-
-        if night_only:
-            mask_night = (resampled.index.hour >= 23) | (resampled.index.hour <= 6)
-            resampled['is_valid_time'] = mask_night
+        # Detect whether thermal data has sub-daily (5m - 1h) resolution required for dT/dt coasting analysis
+        if len(self.df.index) > 1:
+            median_step_sec = self.df.index.to_series().diff().dropna().dt.total_seconds().median()
         else:
-            resampled['is_valid_time'] = True
+            median_step_sec = 86400.0
+        self.has_subhourly_thermal = bool(median_step_sec <= 7200)
 
-        self.coasting_df = resampled[
-            resampled['is_stable_off'] & 
-            resampled['is_valid_time'] & 
-            (resampled['dT_dt'].abs() < 5)
-        ].dropna()
-        
-        self.cooling_data = self.coasting_df[self.coasting_df['Delta_T'] > 2]
-        self.heating_data = self.coasting_df[self.coasting_df['Delta_T'] < -2]
-        
-        # Calculate Fits (Slope = UA/C) and Derive UA (BTU/hr·°F)
-        if len(self.heating_data) > 20:
-            res_h = stats.linregress(self.heating_data['Delta_T'], self.heating_data['dT_dt'])
-            self.fit_heating_stats = res_h
-            self.fit_heating = (res_h.slope, res_h.intercept)
-            if res_h.slope > 0.001:
-                self.UA_heating = self.C_est * res_h.slope
-                self.UA_est = self.UA_heating
+        if self.has_subhourly_thermal:
+            resampled = self.df[required_cols].resample('15min').mean()
+            resampled['dT_dt'] = resampled['Current Temp (F)'].diff() * 4 
+            resampled['Delta_T'] = resampled['Outdoor Temp (F)'] - resampled['Current Temp (F)']
+            
+            # Coasting Logic (for UA)
+            resampled['is_off_now'] = (resampled['Cool Stage 1 (sec)'] < 60) & (resampled['Heat Stage 1 (sec)'] < 60)
+            window_count = int(np.ceil(buffer_minutes / 15)) + 1
+            resampled['is_stable_off'] = resampled['is_off_now'].rolling(window=window_count).min() == 1
 
-        if len(self.cooling_data) > 20:
-            res_c = stats.linregress(self.cooling_data['Delta_T'], self.cooling_data['dT_dt'])
-            self.fit_cooling_stats = res_c
-            self.fit_cooling = (res_c.slope, res_c.intercept)
-            if res_c.slope > 0.001:
-                self.UA_cooling = self.C_est * res_c.slope
-                if self.UA_est == 0:
-                    self.UA_est = self.UA_cooling
+            if night_only:
+                mask_night = (resampled.index.hour >= 23) | (resampled.index.hour <= 6)
+                resampled['is_valid_time'] = mask_night
+            else:
+                resampled['is_valid_time'] = True
+
+            self.coasting_df = resampled[
+                resampled['is_stable_off'] & 
+                resampled['is_valid_time'] & 
+                (resampled['dT_dt'].abs() < 5)
+            ].dropna()
+            
+            self.cooling_data = self.coasting_df[self.coasting_df['Delta_T'] > 2]
+            self.heating_data = self.coasting_df[self.coasting_df['Delta_T'] < -2]
+            
+            # Calculate Fits (Slope = UA/C) and Derive UA (BTU/hr·°F)
+            if len(self.heating_data) > 20:
+                res_h = stats.linregress(self.heating_data['Delta_T'], self.heating_data['dT_dt'])
+                self.fit_heating_stats = res_h
+                self.fit_heating = (res_h.slope, res_h.intercept)
+                if res_h.slope > 0.001:
+                    self.UA_heating = self.C_est * res_h.slope
+                    self.UA_est = self.UA_heating
+
+            if len(self.cooling_data) > 20:
+                res_c = stats.linregress(self.cooling_data['Delta_T'], self.cooling_data['dT_dt'])
+                self.fit_cooling_stats = res_c
+                self.fit_cooling = (res_c.slope, res_c.intercept)
+                if res_c.slope > 0.001:
+                    self.UA_cooling = self.C_est * res_c.slope
+                    if self.UA_est == 0:
+                        self.UA_est = self.UA_cooling
+        else:
+            print("Note: Sub-hourly thermal data unavailable (per-day resolution detected). Skipping coasting Tau/UA derivative analysis.")
+            self.coasting_df = pd.DataFrame()
+            self.cooling_data = pd.DataFrame()
+            self.heating_data = pd.DataFrame()
 
         # 2b. Build Daily Ecobee Summary for Balance Point & Sizing Limit Analysis
         self._build_daily_ecobee_summary()
@@ -398,49 +409,13 @@ class ThermalAnalyzer:
         ecobee_agg['Runtime_Heat_Hr'] = ecobee_agg['Heat Stage 1 (sec)'] / 3600.0
         ecobee_agg['Runtime_Total_Hr'] = ecobee_agg['Runtime_Cool_Hr'] + ecobee_agg['Runtime_Heat_Hr']
         
-        # --- 3. Merge with Power Data ---
+        # --- 3. Merge with Power Data & Build Daily Series ---
         combined = pd.concat([ecobee_agg, self.power_df], axis=1).dropna()
         
-        if combined.empty:
-            print("Warning: No date overlap between Thermostat and Power data.")
-            return
-
-        # --- BASELOAD LOGIC: Linear Regression on Full Overlap (including zero-runtime points) ---
-        self.baseload_reg_df = combined.copy()
-        x = combined['Runtime_Total_Hr']
-        y = combined['kWh']
-        
-        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
-        self.baseload_reg_stats = (slope, intercept, r_value, p_value, std_err)
-        
-        reg_baseload_kw = intercept if freq_str == 'h' else intercept / 24.0
-        print(f"Baseload Regression: Intercept={intercept:.2f} kWh/{freq_str} -> {reg_baseload_kw:.2f} kW (R2={r_value**2:.3f})")
-        
-        fallback_div = 1.0 if freq_str == 'h' else 24.0
-        if reg_baseload_kw > 0.1 and reg_baseload_kw < 10.0:
-            self.baseload_kw = reg_baseload_kw
-            self.baseload_method = "regression"
-            print(f"Using Regression Baseload: {self.baseload_kw:.2f} kW")
-        else:
-            self.baseload_kw = (combined['kWh'] / fallback_div).quantile(0.05)
-            self.baseload_method = "quantile (5th pct)"
-            print(f"Regression yielded invalid baseload. Falling back to quantile: {self.baseload_kw:.2f} kW")
-
-        combined['kWh_HVAC'] = combined['kWh'] - (self.baseload_kw * fallback_div)
-        combined['Active_Delta_T'] = combined['Active_Outdoor'] - combined['Active_Indoor']
-        combined['active_dt_abs'] = combined['Active_Delta_T'].abs()
-        combined['Inverter_Power_kW'] = combined['kWh_HVAC'] / combined['Runtime_Total_Hr'].replace(0, np.nan)
-        combined['Mode'] = self._classify_mode(combined)
-        
-        self.interval_combined = combined[combined['Runtime_Total_Hr'] > (0.01 if freq_str == 'h' else 0.1)].copy()
-
-        # Build daily_combined for Cost to Condition plots (using full daily_power_df if available)
         daily_ecobee = utc_df[cols].resample('D').sum(min_count=1)
-        daily_temps = active_df.resample('D').mean().combine_first(
-            utc_df[['Current Temp (F)', 'Outdoor Temp (F)']].resample('D').mean().rename(
-                columns={'Current Temp (F)': 'Active_Indoor', 'Outdoor Temp (F)': 'Active_Outdoor'}
-            )
-        )
+        daily_active_mean = active_df.resample('D').mean()
+        daily_all_mean = utc_df[['Current Temp (F)', 'Outdoor Temp (F)']].resample('D').mean()
+        daily_temps = daily_active_mean.combine_first(daily_all_mean)
         daily_temps.columns = ['Active_Indoor', 'Active_Outdoor']
         daily_ecobee = pd.concat([daily_ecobee, daily_temps], axis=1)
         daily_ecobee['Runtime_Cool_Hr'] = daily_ecobee['Cool Stage 1 (sec)'] / 3600.0
@@ -452,6 +427,50 @@ class ThermalAnalyzer:
         else:
             daily_power = self.power_df['kWh'].resample('D').sum(min_count=1) if freq_str == 'h' else self.power_df['kWh']
         daily_combined = pd.concat([daily_ecobee, daily_power], axis=1).dropna()
+
+        if combined.empty and daily_combined.empty:
+            print("Warning: No date overlap between Thermostat and Power data.")
+            return
+
+        # --- BASELOAD LOGIC: Linear Regression on Daily Series (24h integration avoids diurnal appliance bias) ---
+        if not daily_combined.empty and len(daily_combined) >= 5:
+            self.baseload_reg_df = daily_combined.copy()
+            self.baseload_reg_freq = 'D'
+            reg_div = 24.0
+        else:
+            self.baseload_reg_df = combined.copy()
+            self.baseload_reg_freq = freq_str
+            reg_div = 1.0 if freq_str == 'h' else 24.0
+
+        x = self.baseload_reg_df['Runtime_Total_Hr']
+        y = self.baseload_reg_df['kWh']
+        
+        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+        self.baseload_reg_stats = (slope, intercept, r_value, p_value, std_err)
+        
+        reg_baseload_kw = intercept / reg_div
+        print(f"Baseload Regression: Intercept={intercept:.2f} kWh/{self.baseload_reg_freq} -> {reg_baseload_kw:.2f} kW (R2={r_value**2:.3f})")
+        
+        fallback_div = 1.0 if freq_str == 'h' else 24.0
+        if reg_baseload_kw > 0.1 and reg_baseload_kw < 10.0:
+            self.baseload_kw = reg_baseload_kw
+            self.baseload_method = "regression"
+            print(f"Using Regression Baseload: {self.baseload_kw:.2f} kW")
+        else:
+            self.baseload_kw = (self.baseload_reg_df['kWh'] / reg_div).quantile(0.05)
+            self.baseload_method = "quantile (5th pct)"
+            print(f"Regression yielded invalid baseload. Falling back to quantile: {self.baseload_kw:.2f} kW")
+
+        if not combined.empty:
+            combined['kWh_HVAC'] = combined['kWh'] - (self.baseload_kw * fallback_div)
+            combined['Active_Delta_T'] = combined['Active_Outdoor'] - combined['Active_Indoor']
+            combined['active_dt_abs'] = combined['Active_Delta_T'].abs()
+            combined['Inverter_Power_kW'] = combined['kWh_HVAC'] / combined['Runtime_Total_Hr'].replace(0, np.nan)
+            combined['Mode'] = self._classify_mode(combined)
+            self.interval_combined = combined[combined['Runtime_Total_Hr'] > (0.01 if freq_str == 'h' else 0.1)].copy()
+        else:
+            self.interval_combined = pd.DataFrame()
+
         if not daily_combined.empty:
             daily_combined['kWh_HVAC'] = daily_combined['kWh'] - (self.baseload_kw * 24.0)
             daily_combined['Active_Delta_T'] = daily_combined['Active_Outdoor'] - daily_combined['Active_Indoor']
@@ -467,7 +486,9 @@ class ThermalAnalyzer:
         plt.tight_layout()
         self._ensure_results_dir()
         if filename:
-            plt.savefig(os.path.join("Results", filename))
+            out_path = os.path.join("Results", filename)
+            plt.savefig(out_path)
+            print(f"Saved plot: {out_path}")
         if show:
             if len(plt.get_fignums()) > 1:
                 plt.show(block=False)
@@ -477,10 +498,23 @@ class ThermalAnalyzer:
             plt.close(fig)
 
     def plot_inverter_curve(self, filename='inverter_profile.png', show=True):
+        """
+        Plots the Inverter Modulation Profile (Instantaneous Power kW vs. Delta T).
+        NOTE: Only generated when hourly-resolution ('h') Green Button power data is available.
+        When only monthly exports (with daily 'D' resolution) are available, intra-day
+        modulation cannot be resolved from 24-hour energy sums due to diurnal temperature
+        swings and day-to-day non-HVAC appliance variance.
+        """
+        if getattr(self, 'power_resolution', 'D') != 'h':
+            print(
+                "Skipping Inverter Modulation Curve: requires hourly-resolution power data "
+                "(only daily-resolution power data is loaded)."
+            )
+            return
+
         comb = getattr(self, 'interval_combined', None)
         if comb is None or comb.empty:
-            comb = getattr(self, 'daily_combined', None)
-        if comb is None or comb.empty: return
+            return
 
         fig, ax = plt.subplots(figsize=(10, 7))
         
@@ -577,7 +611,7 @@ class ThermalAnalyzer:
         if reg_df is None or reg_df.empty:
             reg_df = getattr(self, 'interval_combined', getattr(self, 'daily_combined', None))
         if reg_df is None or reg_df.empty: return
-        freq_str = getattr(self, 'power_resolution', 'D')
+        freq_str = getattr(self, 'baseload_reg_freq', getattr(self, 'power_resolution', 'D'))
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6.5))
         
@@ -936,10 +970,13 @@ class ThermalAnalyzer:
                 lines.append(f"{name}: Insufficient Data (n={n_pts})")
         
         lines.append("\n-- Envelope Properties (Coasting) --")
-        n_h = len(self.heating_data) if self.heating_data is not None else 0
-        n_c = len(self.cooling_data) if self.cooling_data is not None else 0
-        print_fit(self.fit_heating, self.fit_heating_stats, self.UA_heating, "Heating (Winter)", n_h)
-        print_fit(self.fit_cooling, self.fit_cooling_stats, self.UA_cooling, "Cooling (Summer)", n_c)
+        if not getattr(self, 'has_subhourly_thermal', True):
+            lines.append("Skipped: Sub-hourly thermal data unavailable (requires <= 2h sampling interval for dT/dt).")
+        else:
+            n_h = len(self.heating_data) if self.heating_data is not None else 0
+            n_c = len(self.cooling_data) if self.cooling_data is not None else 0
+            print_fit(self.fit_heating, self.fit_heating_stats, self.UA_heating, "Heating (Winter)", n_h)
+            print_fit(self.fit_cooling, self.fit_cooling_stats, self.UA_cooling, "Cooling (Summer)", n_c)
 
         lines.append("\n-- Balance Point & Sizing Limits (Daily Runtime) --")
         if self.balance_point_heating is not None:
@@ -951,9 +988,12 @@ class ThermalAnalyzer:
         if self.design_temp_cooling is not None:
             lines.append(f"Cooling 100% Duty Design Limit: {self.design_temp_cooling:.1f} degF Outdoor")
 
-        if not self.power_df.empty:
+        if not self.power_df.empty or not getattr(self, 'daily_power_df', pd.DataFrame()).empty:
             lines.append("\n-- Energy Signature & UA/COP Cross-Validation --")
+            lines.append(f"Power Data Resolution: {'Hourly + Daily' if getattr(self, 'power_resolution', 'D') == 'h' else 'Daily Only (Monthly Exports)'}")
             lines.append(f"Baseload Power ({self.baseload_method}): {self.baseload_kw:.2f} kW")
+            if getattr(self, 'power_resolution', 'D') != 'h':
+                lines.append("Inverter Modulation Profile: Skipped (requires hourly-resolution Green Button exports).")
             daily_comb = getattr(self, 'daily_combined', None)
             if daily_comb is not None and not daily_comb.empty:
                 heat = daily_comb[daily_comb['Mode'] == 'Heating']
@@ -983,6 +1023,9 @@ class ThermalAnalyzer:
             print(f"Error writing report {filepath}: {e}")
 
     def plot_results(self, filename='thermal_fit.png', show=False):
+        if not getattr(self, 'has_subhourly_thermal', True):
+            print("Skipping Thermal Response (dT/dt) plot: sub-hourly thermal data is unavailable.")
+            return
         self._ensure_results_dir()
         fig, ax = plt.subplots(figsize=(10, 6))
         
