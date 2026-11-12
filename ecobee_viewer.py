@@ -81,8 +81,14 @@ class ThermostatApp:
     def load_data(self, event):
         root = Tk()
         root.withdraw()
-        file_paths = filedialog.askopenfilenames(filetypes=[("CSV Files", "*.csv")])
+        file_paths = filedialog.askopenfilenames(
+            filetypes=[("CSV Files", "*.csv *.CSV"), ("All Files", "*.*")]
+        )
         root.destroy()
+        try:
+            root.update()
+        except Exception:
+            pass
         
         if not file_paths: return
 
@@ -90,7 +96,7 @@ class ThermostatApp:
         for fp in file_paths:
             if fp not in self.files_loaded:
                 try:
-                    # Ecobee format usually has 5 rows of metadata
+                    # Ecobee format usually has 5 rows of metadata; timestamps are naive local time
                     temp_df = pd.read_csv(fp, skiprows=5, index_col=False)
                     new_dfs.append(temp_df)
                     self.files_loaded.append(fp)
@@ -101,7 +107,7 @@ class ThermostatApp:
         if new_dfs:
             if not self.df.empty: new_dfs.append(self.df)
             full_df = pd.concat(new_dfs)
-            # Create standardized Timestamp
+            # Create standardized Timestamp (naive local time)
             full_df['Timestamp'] = pd.to_datetime(full_df['Date'] + ' ' + full_df['Time'])
             full_df = full_df.drop_duplicates(subset=['Timestamp']).sort_values('Timestamp')
             self.df = full_df
@@ -110,16 +116,23 @@ class ThermostatApp:
     def load_power(self, event):
         root = Tk()
         root.withdraw()
-        file_paths = filedialog.askopenfilenames(filetypes=[("XML Files", "*.xml")])
+        file_paths = filedialog.askopenfilenames(
+            filetypes=[("XML Files", "*.xml *.XML"), ("All Files", "*.*")]
+        )
         root.destroy()
+        try:
+            root.update()
+        except Exception:
+            pass
         
         if file_paths:
-            self.power_files.extend(file_paths)
-            print(f"Loaded {len(file_paths)} Power XML files.")
+            new_files = [fp for fp in file_paths if fp not in self.power_files]
+            self.power_files.extend(new_files)
+            print(f"Loaded {len(new_files)} new Power XML files ({len(self.power_files)} total).")
             
-            # Parse XML for GreenButton Plot View
+            # Parse XML for GreenButton Plot View (Green Button <start> is UTC Unix timestamp)
             readings = []
-            for fp in file_paths:
+            for fp in self.power_files:
                 try:
                     tree = ET.parse(fp)
                     root = tree.getroot()
@@ -129,41 +142,53 @@ class ThermostatApp:
                             duration = None
                             value = None
                             for child in elem.iter():
-                                if child.tag.endswith('start'): start = int(child.text)
-                                elif child.tag.endswith('duration'): duration = int(child.text)
-                                elif child.tag.endswith('value'): value = int(child.text)
+                                if child.tag.endswith('start') and child.text:
+                                    start = int(float(child.text.strip()))
+                                elif child.tag.endswith('duration') and child.text:
+                                    duration = int(float(child.text.strip()))
+                                elif child.tag.endswith('value') and child.text:
+                                    value = float(child.text.strip())
                             
                             if start is not None and value is not None:
-                                readings.append({'Start': start, 'Duration': duration, 'Value': value})
+                                if duration and duration < 90000:
+                                    readings.append({'Start': start, 'Duration': duration, 'Value': value})
                 except Exception as e:
                     print(f"Error parsing XML {fp} for UI: {e}")
             
             if readings:
                 pdf = pd.DataFrame(readings)
-                # Ensure UTC conversion for matching if Ecobee data uses local, Green Button typically UTC
+                pdf = pdf.drop_duplicates(subset=['Start', 'Duration'], keep='first')
+                # Green Button timestamps are UTC Unix epoch seconds
                 pdf['Timestamp'] = pd.to_datetime(pdf['Start'], unit='s')
                 pdf['kWh'] = pdf['Value']
                 
-                # Intelligent Resolution Selection
+                # Intelligent Resolution Selection (preserving daily intervals on dates without hourly intervals)
                 hourly_mask = pdf['Duration'] <= 4000
                 daily_mask = pdf['Duration'] >= 80000
                 
-                if hourly_mask.any():
-                    print(f"UI found {hourly_mask.sum()} hourly intervals. Discarding daily intervals.")
+                if hourly_mask.any() and daily_mask.any():
+                    hourly_part = pdf[hourly_mask]
+                    daily_part = pdf[daily_mask]
+                    h_starts = hourly_part['Start'].to_numpy()
+                    def _is_covered_by_hourly(row):
+                        s = row['Start']
+                        e = s + (row['Duration'] if row['Duration'] else 86400)
+                        return ((h_starts >= s) & (h_starts < e)).any()
+                    unmatched_daily = daily_part[~daily_part.apply(_is_covered_by_hourly, axis=1)]
+                    print(
+                        f"UI found {len(hourly_part)} hourly intervals and {len(unmatched_daily)} "
+                        f"non-overlapping daily intervals."
+                    )
+                    pdf = pd.concat([hourly_part, unmatched_daily], ignore_index=True)
+                elif hourly_mask.any():
+                    print(f"UI found {hourly_mask.sum()} hourly intervals.")
                     pdf = pdf[hourly_mask]
                 elif daily_mask.any():
                     print(f"UI found {daily_mask.sum()} daily intervals. Using daily intervals.")
                     pdf = pdf[daily_mask]
                 
                 pdf = pdf.set_index('Timestamp').sort_index()
-                
-                if not self.raw_power_df.empty:
-                    self.raw_power_df = pd.concat([self.raw_power_df, pdf])
-                else:
-                    self.raw_power_df = pdf
-                
-                # Drop duplicates that might come from overlapping XMLs
-                self.raw_power_df = self.raw_power_df[~self.raw_power_df.index.duplicated(keep='first')]
+                self.raw_power_df = pdf[~pdf.index.duplicated(keep='first')]
                 
             self.ax1.set_title(f"Ecobee Data | {len(self.files_loaded)} CSVs | {len(self.power_files)} Power XMLs")
             self.update_plot() # Trigger plot update to show new power data
@@ -260,9 +285,13 @@ class ThermostatApp:
 
     def get_options(self):
         status = self.check.get_status()
+        raw_sq = getattr(self.text_box, 'text', self.sq_ft_val).strip()
+        raw_tz = getattr(self.text_tz, 'text', self.tz_val).strip()
+        self.sq_ft_val = raw_sq or self.sq_ft_val
+        self.tz_val = raw_tz or self.tz_val
         try:
             sq = float(self.sq_ft_val)
-        except:
+        except Exception:
             sq = 1500
         return {
             'night_only': status[0],
@@ -334,6 +363,8 @@ class ThermostatApp:
                 # Outputs
                 analyzer.generate_report(filename=f"thermal_results_{base_name}.txt")
                 analyzer.plot_results(filename=f"thermal_plot_{base_name}.png", show=True)
+                analyzer.plot_balance_point(filename=f"balance_point_{base_name}.png", show=True)
+                analyzer.plot_sizing_limit(filename=f"sizing_limit_{base_name}.png", show=True)
                 
                 if self.power_files:
                     analyzer.plot_inverter_curve(filename=f"inverter_profile_{base_name}.png", show=True)

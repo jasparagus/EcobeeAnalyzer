@@ -20,14 +20,17 @@ The primary goal of this project is to overcome the "observability gap" in resid
 
 * **Interactive Data Viewer:** Visualize indoor/outdoor temperatures, setpoints, and HVAC runtime with a zoomable interface.
 * **Thermal Envelope Analysis:**
-    * Calculates the house's **Time Constant ($\tau$)**.
+    * Calculates the house's **Time Constant ($\tau$)** and **Heat Transfer Coefficient ($UA$)** with subtle 95% confidence intervals.
     * Separates analysis into Heating (Winter) and Cooling (Summer) regimes.
     * **"Washout" Filtering:** Automatically excludes data periods immediately following HVAC cycles to prevent thermal inertia from corrupting the analysis.
     * **Solar Exclusion:** Optional "Night Only" mode to isolate conductive heat loss from solar gain.
-* **Inverter Profiling (Energy Signature):**
-    * Ingests "Green Button" XML power data from utility providers.
+* **Balance Point & Sizing Limit Profiling:**
+    * **Building Balance Point ($T_{\text{balance}}$):** Regresses daily HVAC runtime against outdoor temperature to determine the exact outdoor temperature where heating or cooling is first required, isolating "free" internal and solar heat gains.
+    * **Heat Pump Sizing & Capacity Limit:** Projects daily HVAC duty cycle (%) vs. $\Delta T$ to the 100% duty-cycle ceiling (24h continuous runtime) to identify the minimum/maximum outdoor design temperature the system can sustain before losing setpoint or requiring auxiliary heat.
+* **Inverter Profiling (Energy Signature & COP Cross-Validation):**
+    * Ingests "Green Button" XML power data from utility providers (supporting both hourly and daily resolutions without losing non-overlapping daily files).
     * Calculates **Baseload Power** to isolate HVAC energy.
-    * Generates a performance curve: **Daily Energy (kWh) vs. Temperature Delta**, showing the "cost to condition" the home at various outdoor temperatures.
+    * Generates a performance curve: **Daily Energy (kWh) vs. Temperature Delta**, showing the "cost to condition" the home at various outdoor temperatures and cross-validating envelope $UA$ against electrical input to estimate **Effective Seasonal COP**.
 
 ---
 
@@ -55,12 +58,14 @@ $$\underbrace{\frac{dT_{in}}{dt}}_{Y} = \underbrace{\frac{UA}{C}}_{\text{Slope }
 The inverse of the slope gives us the **Thermal Time Constant ($\tau$)**:
 $$\tau = \frac{C}{UA} = \frac{1}{Slope}$$
 
-### 3.3 Energy Signature (Daily kWh vs Delta T)
+### 3.3 Energy Signature (Daily kWh vs Delta T) & COP Cross-Validation
 For inverter systems, instantaneous power varies. A more robust metric is the **Energy Signature**, which correlates daily energy input with the daily thermal load (Delta T).
 
 $$E_{hvac}(kWh) \approx E_{total} - (P_{base} \times 24h)$$
 
-Plotting $E_{hvac}$ vs $(T_{out} - T_{in})$ reveals the system's efficiency curve and the building's aggregate thermal load.
+Plotting $E_{hvac}$ vs $(T_{out} - T_{in})$ reveals the system's efficiency curve and the building's aggregate thermal load. Combining the coasting-derived $UA$ ($\text{BTU/hr}\cdot^\circ\text{F}$) with the daily electrical energy slope ($S_{\text{kWh/}^\circ\text{F}}$) provides an independent estimate of the heat pump's **Effective Seasonal COP**:
+
+$$\text{COP}_{\text{eff}} = \frac{UA \times 24\text{ hr}}{3412.14\text{ BTU/kWh} \times |S_{\text{kWh/}^\circ\text{F}}|}$$
 
 ---
 
@@ -72,7 +77,7 @@ Plotting $E_{hvac}$ vs $(T_{out} - T_{in})$ reveals the system's efficiency curv
 
 ### Installation
 1.  Clone the repository.
-2.  Install dependencies:
+2.  Install dependencies (on Linux, ensure `python3-tk` is also installed via your system package manager):
     ```bash
     pip install pandas matplotlib scipy numpy
     ```
@@ -84,11 +89,32 @@ Plotting $E_{hvac}$ vs $(T_{out} - T_{in})$ reveals the system's efficiency curv
 ### Workflow
 1.  **Export Data:**
     * **Ecobee:** Log in to the web portal -> Home IQ -> System Monitor -> Download Data.
-    * **Power (Optional):** Download "Green Button" XML (Daily resolution) from your utility provider.
+    * **Power (Optional):** Download "Green Button" XML (Hourly or Daily resolution) from your utility provider.
 2.  **Load:** Use the GUI buttons to load the CSVs and XMLs.
 3.  **Configure:**
-    * Set **Square Footage** (Default: 1500 sq ft).
+    * Set **Square Footage** (Default: 1500 sq ft) and **Timezone** (`TZ`, Default: `US/Pacific`).
     * Toggle **Night Only** to remove solar noise (Recommended).
     * Toggle **30m Buffer** to ignore lingering heat after HVAC cycles.
 4.  **Analyze:** Click "Calculate Profile".
 5.  **Results:** Check the `./Results` folder for generated plots (`.png`) and text reports (`.txt`).
+
+---
+
+## 5. Data Timezone & Alignment Conventions
+
+Understanding the timestamp conventions of the two input formats is essential when inspecting or extending the pipeline:
+
+* **Ecobee CSV Data (Naive Local Time):** Ecobee exports store `Date` and `Time` in the thermostat's **naive local wall-clock time** (with no embedded timezone offset).
+* **Green Button XML Data (UTC Unix Timestamps):** Utility Green Button `<IntervalReading><start>` elements are stored as **UTC Unix epoch timestamps** (seconds since `1970-01-01T00:00:00Z`).
+* **Alignment Behavior:**
+    * Envelope coasting, Balance Point, and Sizing Limit analyses operate directly on the Ecobee local-time series (so nighttime filters like `23:00–06:00` naturally reflect local night).
+    * When correlating Ecobee runtime with Green Button energy in `_analyze_inverter_performance`, the Ecobee timestamps are localized using the configured `TZ` (e.g., `US/Pacific`), converted to `UTC` (handling DST transitions), and aligned against the UTC Green Button intervals.
+    * In the interactive viewer (`ecobee_viewer.py`), the main temperature/program axes display Ecobee naive local time, while raw Green Button bars are plotted as loaded in naive UTC unless aligned during profile calculation.
+
+---
+
+## 6. Known Limitations & TODO
+
+* **TODO — Direct Empirical Baseload from Zero-Runtime Intervals:**
+    * *Background:* An alternative to linear regression (`kWh` vs. `Runtime_Total_Hr`) is measuring household baseload directly during intervals when the HVAC system is completely off (`Runtime == 0`).
+    * *Why it is currently deferred:* This approach was previously attempted on real dataset exports but failed to produce reliable baseload subtraction because **household baseload is not constant across 24-hour cycles** due to daytime occupancy, electronics, cooking, and appliance usage. Because zero-runtime intervals are not uniformly distributed across the day (for example, in winter `Runtime == 0` occurs disproportionately during warmer afternoon hours when non-HVAC electronics/appliance loads are high, whereas in summer it occurs mostly overnight when household loads are low), a flat zero-runtime average introduces severe diurnal bias. Future work should explore time-of-day (diurnal) baseload stratification when hourly Green Button data is available.
